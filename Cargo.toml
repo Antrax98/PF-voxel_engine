@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+    "voxel_test",
+    "voxel_engine",
+    "voxel_render",
+    "voxel_shared",
+]

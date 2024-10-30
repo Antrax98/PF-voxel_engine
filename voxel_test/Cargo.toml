@@ -1,0 +1,9 @@
+[package]
+name = "voxel_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+voxel_engine = {path = "../voxel_engine"}
+voxel_render = {path = "../voxel_render"}
+bevy = "0.14"

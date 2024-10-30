@@ -1,0 +1,11 @@
+[package]
+name = "voxel_render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+voxel_shared = {path = "../voxel_shared"}
+bevy = "0.14"
+bevy_easy_compute = "0.14.1"
+bytemuck = "1.19.0"
+bitvec = "1.0.1"
