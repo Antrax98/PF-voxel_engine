@@ -7,3 +7,4 @@ edition = "2021"
 voxel_engine = {path = "../voxel_engine"}
 voxel_render = {path = "../voxel_render"}
 bevy = "0.14"
+iyes_perf_ui = "0.3.0"
