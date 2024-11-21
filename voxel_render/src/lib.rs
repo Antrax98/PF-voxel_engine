@@ -88,7 +88,7 @@ fn deteccion_movimiento(
     if keys.pressed(KeyCode::KeyD) {
         direccion += camera_t.right().as_vec3();
     }
-    let movimineto = direccion.normalize_or_zero() * time.delta_seconds();//multiplicar por un escalar para hacer el movimiento mas rapido
+    let movimineto = direccion.normalize_or_zero() * time.delta_seconds();//multiplicar por un escalar para hacer el movimiento mas rapido/lento
     camera_t.translation += movimineto;
     
 
@@ -104,8 +104,8 @@ fn deteccion_movimiento(
     */
     
     for ev in evr_motion.read() {
-        camera_t.rotate_y(-ev.delta.x * 0.03);
-        camera_t.rotate_x(-ev.delta.y * 0.03);
+        camera_t.rotate_y(-ev.delta.x * 0.003);
+        camera_t.rotate_local_x(-ev.delta.y * 0.003);
         
     }
     let forward = camera_t.forward(); 
@@ -114,11 +114,16 @@ fn deteccion_movimiento(
     //guardar datos en variable
     var_dat.direction = NeoVec3::nuevo(forward.x,forward.y,forward.z);
     var_dat.source = NeoVec3::nuevo(camera_t.translation.x,camera_t.translation.y,camera_t.translation.z);
+    var_dat.camera_mat = NeoMat4::from_mat4(camera_t.compute_matrix());
     
     
-    
-    println!("source: {:?} + direcction: {:?}",var_dat.source,var_dat.direction);
-    
+    //println!("source: {:?} + direcction: {:?}",var_dat.source,var_dat.direction);
+    let mut cuat = camera_t.rotation.to_euler(EulerRot::XYZ);
+    cuat.0 = (cuat.0*180.)/PI;
+    cuat.1 = (cuat.1*180.)/PI;
+    cuat.2 = (cuat.2*180.)/PI;
+
+    println!("{:?}",cuat);
     
     //escribir variables en bvuffer
     compute_worker.write("variable_data", &var_dat);
@@ -142,7 +147,7 @@ fn camera3Dsetup(
                 order: 1,
                 ..default()
             },
-            transform: Transform::from_xyz(50., 50., 10.)
+            transform: Transform::from_xyz(126., 126., 126.)
                 .looking_at(-Vec3::Z, Vec3::Y),
             
             camera_3d: Camera3d {
@@ -260,6 +265,39 @@ impl NeoVec3 {
 
 #[repr(C)]
 #[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
+struct NeoVec4{
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32
+}
+impl Default for NeoVec4{
+    fn default() -> Self {
+        NeoVec4{
+            x: 0.,
+            y: 0.,
+            z: 0.,
+            w: 0.
+        }
+    }
+}
+impl NeoVec4 {
+    fn nuevo(x:f32, y:f32, z:f32, w:f32) -> Self {
+        NeoVec4{
+            x,
+            y,
+            z,
+            w
+        }
+    }
+
+    fn from_vec4(aux: &[f32;4]) -> Self {
+        NeoVec4{x:aux[0],y:aux[1],z:aux[2],w:aux[3]}
+    }
+}
+
+#[repr(C)]
+#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
 struct NeoUVec3{
     x: u32,
     y: u32,
@@ -275,6 +313,34 @@ impl Default for NeoUVec3{
     }
 }
 
+#[repr(C)]
+#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
+struct NeoMat4{
+    x_axis: NeoVec4,
+    y_axis: NeoVec4,
+    z_axis: NeoVec4,
+    w_axis: NeoVec4,
+}
+impl NeoMat4 {
+    fn IDENTITY() -> Self {
+        NeoMat4{
+            x_axis: NeoVec4{x: 1., y: 0., z: 0., w: 0.},
+            y_axis: NeoVec4{x: 0., y: 1., z: 0., w: 0.},
+            z_axis: NeoVec4{x: 0., y: 0., z: 1., w: 0.},
+            w_axis: NeoVec4{x: 0., y: 0., z: 0., w: 1.},
+        }
+    }
+    fn from_mat4(aux : Mat4) -> Self{
+        NeoMat4 {
+            x_axis: NeoVec4::from_vec4(&aux.x_axis.to_array()),
+            y_axis: NeoVec4::from_vec4(&aux.y_axis.to_array()),
+            z_axis: NeoVec4::from_vec4(&aux.z_axis.to_array()),
+            w_axis: NeoVec4::from_vec4(&aux.w_axis.to_array()) 
+        }
+    }
+}
+
+
 
 #[repr(C)]
 #[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
@@ -284,6 +350,7 @@ struct VarData{
     fov: f32,//field of view, por ahora es f32
     used_buffer: u32, //atomico encargado de dictar a que indice del feedback_buffer escribir y leer;
     time: u32,
+    camera_mat: NeoMat4
 }
 
 //TODO: mover a voxel shader para ser usado por voxel_engine
@@ -323,14 +390,15 @@ impl ComputeWorker for VoxelRenderWorker {
 
         let mut var_data: VarData= VarData{
             source: NeoVec3::nuevo(50.,50.,10.),//Vec3 { x: 0., y: 0., z: 0. },
-            direction: NeoVec3::nuevo(0.,0.,1.),//Vec3 { x: 0., y: 0., z: -1. },
+            direction: NeoVec3::nuevo(0.,0.,-1.),//Vec3 { x: 0., y: 0., z: -1. },
             fov: 50.,
             used_buffer: 0,
-            time: 0
+            time: 0,
+            camera_mat: NeoMat4::IDENTITY()
         };
-        var_data.source.x = 50.;
-        var_data.source.y = 50.;
-        var_data.source.z = 50.; 
+        var_data.source.x = 126.;
+        var_data.source.y = 126.;
+        var_data.source.z = 126.; 
 
         let blank_image = [0 as u32;(SIZE.0 as usize)*(SIZE.1 as usize)];
 
@@ -350,6 +418,9 @@ impl ComputeWorker for VoxelRenderWorker {
         //let gri:Vec<u32> = test_brickgrid(WORLD_SIZE, ws);
         // [def_brickgrid_cell;ws as usize]
         //let test_grid = &gri[..16777216];
+
+
+        let camera_transform: Mat4 = Mat4::IDENTITY;
 
         let worker = AppComputeWorkerBuilder::new(world)
         .add_uniform("data_struct",&init_data)

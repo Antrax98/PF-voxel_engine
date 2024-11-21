@@ -19,12 +19,27 @@ struct NeoUVec3{
     z: u32
 }
 
+struct NeoVec4{//ELIMINAR???
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32
+}
+
+struct NeoMat4{//ELIMINAR???
+    x_axis: NeoVec4,
+    y_axis: NeoVec4,
+    z_axis: NeoVec4,
+    w_axis: NeoVec4,
+}
+
 struct VarData {
     cam_src : NeoVec3,
     cam_dir: NeoVec3,
     fov: f32,
     used_buff: atomic<u32>,//usar como contador, a que espacio de memoria se puede escribir en el feedback_buffer y/o hasta cual esta ocupado
-    time: u32
+    time: u32,
+    cam_transform: NeoMat4
 }
 
 struct Ray {
@@ -35,7 +50,8 @@ struct Ray {
 struct Camera {
     eye: vec3<f32>,
     targeting: vec3<f32>,
-    fov: f32
+    fov: f32,
+    transform: NeoMat4//mat4x4<f32>//eliminar??
 }
 
 struct Test {
@@ -63,7 +79,7 @@ var<storage, read_write> brickmap_data: array<brickmap>;//brickmaps cargador
 @group(0) @binding(5)
 var<storage, read_write> feedback : array<NeoUVec3>; // feedback de solo escritura en gpu
 
-
+const pi = radians(180.0);
 
 @compute @workgroup_size(1,1,1)//64
 fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
@@ -108,7 +124,7 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     let camsrc: vec3<f32> = vec3<f32>(var_dat.cam_src.x,var_dat.cam_src.y,var_dat.cam_src.z);
     let camdir: vec3<f32> = vec3<f32>(var_dat.cam_dir.x,var_dat.cam_dir.y,var_dat.cam_dir.z);
 
-    let camara: Camera = Camera(camsrc,camdir,var_dat.fov);
+    let camara: Camera = Camera(camsrc,camdir,var_dat.fov,var_dat.cam_transform);
 
     var rayo :Ray = crear_rayo(invocation_id.x,invocation_id.y,512u,512u,camara);
 
@@ -118,7 +134,7 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     if (hit) {
         //asign_color(pixel,0x00ffffffu);
     } else {
-        asign_color(pixel,0x0000ffffu);
+        asign_color(pixel,0x674ea7ffu);//MORADO
     }
 
 
@@ -135,9 +151,19 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
 
 }
 
+
+
 fn neo_crear_rayo(x: u32, y: u32, image_width: u32, image_height: u32, camera: Camera) -> Ray {
     //no usar aspect ratio
 
+    ///let aspect_ratio f32= f32(image_width)/f32(image_height);
+
+
+
+
+
+
+    /*
     let viewport_height: f32 = 2.;
     let viewport_width: f32 = 2.;
 
@@ -156,6 +182,81 @@ fn neo_crear_rayo(x: u32, y: u32, image_width: u32, image_height: u32, camera: C
 
     // Calculate the location of the upper left pixel.
     let viewport_upper_left: vec3<f32>= camera_center - vec3<f32>(0., 0., focal_length) - viewport_u/2 - viewport_v/2;
+    */
+
+    //0.5 is a shift to align te pixel to te viewport
+    //NDC space results will be in [0,1]
+    let p_ndc_x: f32 = (f32(x) + 0.5) / f32(image_width);
+    let p_ndc_y: f32 = (f32(y) + 0.5) / f32(image_height);
+
+    //Screen space results will be [-1,1]
+    let p_screen_x = 1 - 2 * p_ndc_x -1;
+    let p_screen_y = 1 - 2 * p_ndc_y -1;
+
+    //se asume que width es mayor que height
+    let aspect_ratio: f32 = f32(image_width)/f32(image_height);
+
+    //camera space with fov into account
+    let pixel_camera_x: f32 = (2* (p_screen_x -1))* aspect_ratio * tan(camera.fov/2);
+    let pixel_camera_y: f32 = 1-(2*p_screen_y) * tan(camera.fov/2);
+
+    // Pixel Camera Space vec
+    let pcs: vec3<f32> = vec3<f32>(pixel_camera_x,pixel_camera_y,-1.);
+
+    
+    //let ctw/camera_to_world: mat4x4<f32> = camera.transform; //usar si NeoMat4 no funciona
+    let ctw: NeoMat4 = camera.transform;
+    
+    let rayPWorld: vec3<f32> = vec3<f32>(
+        ctw.x_axis[0]*pcs.x + ctw.x_axis[1]*pcs.y + ctw.x_axis[2]*pcs.z,
+        ctw.y_axis[0]*pcs.x + ctw.y_axis[1]*pcs.y + ctw.y_axis[2]*pcs.z,
+        ctw.z_axis[0]*pcs.x + ctw.z_axis[1]*pcs.y + ctw.z_axis[2]*pcs.z
+    );
+
+
+    //PRUEBA: multiplicar forward(targeting) con la direccion del PCS y entregar eso como resultado
+    //de no funcionar, hacerlo con el mat4
+    //let rayPWorld: vec3<f32> = camera.targeting*pcs;
+    
+    let ray_dir: vec3<f32> = rayPWorld-camera.eye;
+    
+    //let ray_dir: vec3<f32> = vec3<f32>(pcs.x,pcs.y,-1) - camera.targeting;//probar quitando camera.targeting para simular que existe en el origen
+
+
+    let ray: Ray = Ray(camera.eye,ray_dir);
+
+
+}
+
+fn new_neo_crear_rayo(x: u32, y: u32, image_width: u32, image_height: u32, camera: Camera) -> Ray {
+    
+    
+    //0.5 is a shift to align te pixel to te viewport
+    //NDC space results will be in [0,1]
+    let p_ndc_x: f32 = (f32(x) + 0.5) / f32(image_width);
+    let p_ndc_y: f32 = (f32(y) + 0.5) / f32(image_height);
+
+    //Screen space results will be [-1,1]
+    let p_screen_x = 1 - 2 * p_ndc_x -1;
+    let p_screen_y = 1 - 2 * p_ndc_y -1;
+
+    //se asume que width es mayor que height
+    let aspect_ratio: f32 = f32(image_width)/f32(image_height);
+
+    //camera space with fov into account
+    let pixel_camera_x: f32 = (2* (p_screen_x -1))* aspect_ratio * tan(camera.fov/2);
+    let pixel_camera_y: f32 = 1-(2*p_screen_y) * tan(camera.fov/2);
+
+    // Pixel Camera Space vec
+    let pcs: vec3<f32> = vec3<f32>(pixel_camera_x,pixel_camera_y,-1.);
+
+
+    //cross mult forward_dir(camera.targeting) x UpDir (y positivo)
+    let upDirection :vec3<f32> = vec3<f32>(0.,1.,0.);
+    let rightDirection :vec3<f32> = cross(camera.targeting,upDirection); 
+
+
+
 
 
 
@@ -165,6 +266,7 @@ fn neo_crear_rayo(x: u32, y: u32, image_width: u32, image_height: u32, camera: C
 
 }
 
+//ahora parece funcionar
 fn crear_rayo(x: u32, y: u32, width: u32, height: u32, camera: Camera) -> Ray{
     //X y Y son el numero de rayos por axis
     //height y width son el numero de pixeles por axis?
@@ -174,9 +276,10 @@ fn crear_rayo(x: u32, y: u32, width: u32, height: u32, camera: Camera) -> Ray{
     let half_height = tan(theta/2.0);
     let half_width = aspect * half_height;
 
-    let w: vec3<f32> = normalize(camera.eye-normalize(camera.targeting));
-    let u: vec3<f32> = normalize(cross(vec3<f32>(0.,1.,0.),w));
-    let v: vec3<f32> = cross(w,u);
+    //let w: vec3<f32> = normalize(camera.eye-normalize(camera.targeting));
+    let w: vec3<f32> = normalize(camera.targeting);//vector hacia delante de la camara
+    let u: vec3<f32> = normalize(cross(vec3<f32>(0.,1.,0.),w));//vector horizontal a la camara
+    let v: vec3<f32> = cross(w,u);// vector vertical? a la camara
 
     let origin: vec3<f32> = camera.eye;
     let lower_left_corner: vec3<f32> = origin - (u*half_width) - (v*half_height) - w;
@@ -195,9 +298,10 @@ fn crear_rayo(x: u32, y: u32, width: u32, height: u32, camera: Camera) -> Ray{
 
 //devolvera falso si no golpea nada
 fn raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
-    let MAX_RAY_STEPS: u32 = 50u;
+    let MAX_RAY_STEPS: u32 = 500u;
     var rayo = ray;
 
+    //variables donde se guardaran datos importantes
     //borrar los que no se utilizen
     var o_hit_axis: vec3<bool> = vec3<bool>(false,false,false); //axis del hit
     //var o_hit_dist: vec3<f32> = vec3<f32>(0.,0.,0.); // distancia hasta donde dio un hit
@@ -206,7 +310,14 @@ fn raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
     var o_hit_uvw: vec3<f32> = vec3<f32>(0.,0.,0.); // posicion del hit, en el voxel
     var o_hit_nor: vec3<f32> = vec3<f32>(0.,0.,0.); //normal de la cara del voxel golpeado
 
-    rayo.direction = normalize(rayo.direction)+0.0001;
+
+    
+    rayo.direction = normalize(rayo.direction);
+
+    //esto se encarga de, en caso que xyz no sean igual a zero
+    rayo.direction.x = rayo.direction.x+0.0001;
+    rayo.direction.y = rayo.direction.y+0.0001;
+    rayo.direction.z = rayo.direction.z+0.0001;
     
     var ray_signf: vec3<f32> = sign(rayo.direction);
     var ray_sign: vec3<i32> = vec3<i32>(i32(ray_signf.x),i32(ray_signf.y),i32(ray_signf.z));
@@ -225,8 +336,9 @@ fn raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
 
     for (var i = 0u; i < MAX_RAY_STEPS; i++) {
 
+        //cambiar numeros mayores por el tamaño maximo del mundo (deve ser una variable)
         if(voxel_coords.x>255 || voxel_coords.y>255 || voxel_coords.z>255 || voxel_coords.x<0 || voxel_coords.y<0 || voxel_coords.z<0){
-            asign_color(pixel,0x00ff00ffu);
+            asign_color(pixel,0x00ff00ffu);//VERDE
             return true;
         }
 
@@ -238,7 +350,7 @@ fn raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
                 return false;
             }
             */
-            //o_hit_axis = mask; //redundante
+            //o_hit_axis = mask; //redundante //usar para pruebas despues
 
             //determina el hit final en espacio global ¿inecesario?
             o_hit_pos = side_distance - rayo.source;
@@ -275,7 +387,8 @@ fn raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
 
         var mini: vec3<f32> = min(side_distance.yzx, side_distance.zxy);
 
-        mask = vec3<bool>(side_distance.x<=mini.x, side_distance.y<=mini.y, side_distance.z<=mini.z);
+        //mask = vec3<bool>(side_distance.x<=mini.x, side_distance.y<=mini.y, side_distance.z<=mini.z);
+        mask = vec3<bool>(side_distance<=mini);
 
         side_distance = side_distance + (vec3<f32>(f32(mask.x),f32(mask.y),f32(mask.z)) * ray_step);
 
@@ -304,6 +417,7 @@ fn is_voxel_filled(coordenadas: vec3<i32>) -> u32 {
     //let color: u32 = brickgrid[u32(coordenadas.x) + (255*(u32(coordenadas.y)+ (255 * u32(coordenadas.z))))];
 
     //SOLO POR TEST
+    /*
     if(coordenadas.z==101 && 0<coordenadas.y && coordenadas.y<300 && 0<coordenadas.x && coordenadas.x<300) {
         //grid[(x + world.1 * (y +(world.2 * z))) as usize] = 0xff0000ff;
         color = 0xff0000ffu;
@@ -312,7 +426,34 @@ fn is_voxel_filled(coordenadas: vec3<i32>) -> u32 {
         //grid[(x + world.1 * (y +(world.2 * z))) as usize] = 0xff0000ff;
         color = 0xff00ffffu;
     }
+    */
 
+
+    if(coordenadas.x <= 2){
+        //color -x BLANCO
+        color = 0xffffffffu;
+    }
+    if(coordenadas.x >= 250){
+        //color +x NEGRO
+        color = 0x000000ffu;
+    }
+    if(coordenadas.y <= 2){
+        //color -y ROJO
+        color = 0xff0000ffu;
+    }
+    if(coordenadas.y >= 250){
+        //color +y AMARILLO
+        color = 0xffff00ffu;
+    }
+    if(coordenadas.z <= 2){
+        //color -z CELESTE
+        color = 0x00ffffffu;
+    }
+    if(coordenadas.z >= 250){
+        //color +z FUXIA
+        color = 0xff00ffffu;
+    }
+    
 
     return color;
 
