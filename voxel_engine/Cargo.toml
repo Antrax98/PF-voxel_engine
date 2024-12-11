@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 bevy = "0.14"
 voxel_shared = {path = "../voxel_shared"}
+bitvec = "1.0.1"
+noise = "0.9"

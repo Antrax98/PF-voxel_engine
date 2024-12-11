@@ -1,9 +1,9 @@
 use bevy::{
-    a11y::accesskit::Size, prelude::*, render::{prelude::Image, render_asset::RenderAssetUsages, render_resource::*, texture}
+    a11y::accesskit::Size, prelude::*, reflect::TypeData, render::{prelude::Image, render_asset::RenderAssetUsages, render_resource::*, texture}
 };
 use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 use bitvec::prelude::*;
-use std::{convert::TryInto, f32::consts::PI, iter};
+use std::{cell::Cell, cmp::min, convert::TryInto, f32::consts::PI, iter};
 use bevy_easy_compute::prelude::*;
 use voxel_shared::*;
 
@@ -14,6 +14,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 
 const COMPUTE_SHADER_PATH: &str = "shaders/voxel_processor.wgsl";
+const ALLOCATOR_SHADER_PATH: &str = "shader/voxel_allocator.wgsl";
 
 //Tamaño de la ventana
 //TODO: obtener el valor a travez del AddPlugins() Params
@@ -24,11 +25,9 @@ const SIZE: (u32,u32) = (512,512);
 const DISPLAY_FACTOR: u32 = 4;
 const WORKGROUP_SIZE: u32 = 8;
 
-const FEEDBACK_BUFFER_SIZE: usize = 10;
+const FEEDBACK_BUFFER_SIZE: usize = 256;
 
-//tamaño en brickmaps
-//TODO: obtener el valor al iniciar el ejecutable
-const WORLD_SIZE: (u32,u32,u32)= (256,256,256);
+const OBJECT_POOL_MAX_SIZE: usize = 15000000; //aprox 1GB
 
 
 pub struct VoxelRenderPlugin;
@@ -38,20 +37,279 @@ impl Plugin for VoxelRenderPlugin {
         
 
         app.add_systems(Startup, instanciar_renderisadores);
-        app.add_plugins(AppComputePlugin);
-        app.add_plugins(AppComputeWorkerPlugin::<VoxelRenderWorker>::default());
-        //app.add_systems(Update, test);
-        app.add_systems(Update, actualizar_imagen);
-        app.add_systems(Update, deteccion_movimiento);
-        //app.add_systems(Update, movimiento_mouse);
         app.add_systems(Startup, cursor_grab);
         app.add_systems(Startup, camera3Dsetup);
+        app.add_plugins(AppComputePlugin);
+        app.add_plugins(AppComputeWorkerPlugin::<VoxelRenderWorker>::default());
+
+        
+        app.add_systems(Update, (buffer_to_resource,resource_to_buffer));
+        
+        app.add_systems(
+            Update, 
+            (
+                actualizar_imagen,
+                deteccion_movimiento,
+                feedback_sender_system,
+            )
+            .after(buffer_to_resource)
+            .before(resource_to_buffer)
+            );
+        
+        app.add_systems(Update, (cell_receiver_allocator).before(feedback_sender_system));
+        
+        app.insert_resource(VariableData{data:VarData::default()});
+        let feed_data_aux : Vec<NeoUVec3> = vec![NeoUVec3::default();FEEDBACK_BUFFER_SIZE];
+        app.insert_resource(Feedback{data: feed_data_aux});
+        app.insert_resource(ObjectPool{data: Vec::new(), indice: 0});
+        app.insert_resource(CommandBuffer{comandos: Vec::new()});
 
 
+        app.add_event::<CellsRequest>();
 
 
 
     }
+}
+
+#[derive(Resource)]
+struct VariableData {
+    data: VarData
+}
+
+#[derive(Resource)]
+struct Feedback {
+    data: Vec<NeoUVec3>
+}
+
+//mover a voxel_shared
+
+
+fn feedback_sender_system(
+    mut variable_data: ResMut<VariableData>,
+    feedback_buffer : Res<Feedback>,
+    compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>,
+    mut ev_cellrequest: EventWriter<CellsRequest>
+) {
+
+    if !compute_worker.ready() {
+        return
+    }
+
+    // let mut var_dat: &mut VarData = &mut variable_data.data;
+    // let mut feed_buff: &Vec<NeoUVec3> = &feedback_buffer.data;
+
+    // let mut end_for: usize = 0;
+    // if(var_dat.feedback_idx<FEEDBACK_BUFFER_SIZE as u32){
+    //     end_for = var_dat.feedback_idx as usize;
+    // }else{
+    //     end_for = FEEDBACK_BUFFER_SIZE;
+    // }
+    
+
+    // for i in 0..end_for {
+
+    //     print!("{},{},{} -",feed_buff[i as usize].x,feed_buff[i as usize].y,feed_buff[i as usize].z);
+
+    //     continue;
+    // }
+    // println!("new line");
+    // var_dat.feedback_idx = 0;
+
+
+    //eliminar los NeoUVec3 repetidos para enviarselos al voxel_engine
+    //? puede que eliminar los repetidos sea inecesario, pero ayuda al momento de generar los chunks
+    let var_dat: &mut VarData = &mut variable_data.data;
+    let feed_buff: &Vec<NeoUVec3> = &feedback_buffer.data;
+
+    if var_dat.feedback_idx != 0 {
+        let mut feedback_packet: Vec<NeoUVec3> = Vec::new();
+        feedback_packet.push(feed_buff[0].clone());
+        'outer: for i in 1..min(FEEDBACK_BUFFER_SIZE,(var_dat.feedback_idx) as usize) {
+            for nvec in feedback_packet.iter(){
+                if feed_buff[i].x == nvec.x && feed_buff[i].y == nvec.y && feed_buff[i].z == nvec.z {
+                    continue 'outer;
+                }
+            }
+            feedback_packet.push(feed_buff[i].clone());
+        }
+
+
+        //aqui enviar al voxel_engine
+        ev_cellrequest.send(CellsRequest(feedback_packet));
+    }
+
+    //necesaro para que el shader pueda rellenar el buffer desde el inicio
+    var_dat.feedback_idx = 0;
+
+}
+
+//agregar commandoIdx al vardata
+#[repr(C)]
+#[derive(ShaderType,Debug,Pod,Zeroable,Clone, Copy)]
+pub struct Comando{
+    pub allocar: BMAlloc,
+    pub deallocar: u32,
+    pub datos: Brickmap,
+}
+impl Default for Comando{
+    fn default() -> Self {
+        Comando{
+            allocar: BMAlloc{bm_idx:0,bm_buffer_idx:0},
+            deallocar: 0,
+            datos: Brickmap::default(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(ShaderType,Debug,Pod,Zeroable,Clone, Copy)]
+pub struct BMAlloc {
+    pub bm_idx: u32,
+    pub bm_buffer_idx: u32
+}
+
+#[derive(Resource)]
+pub struct ObjectPool{
+    pub data: Vec<BMAlloc>,
+    pub indice: u32
+}
+
+#[derive(Resource)]
+pub struct CommandBuffer{
+    pub comandos: Vec<Comando>
+}
+
+fn cell_receiver_allocator(
+    mut ev_cellresponse: EventReader<CellsResponse>,
+    compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>,
+    mut command_buffer: ResMut<CommandBuffer>,
+    mut object_pool: ResMut<ObjectPool>
+) {
+    if !compute_worker.ready() {
+        return
+    }
+    //DO SOMETHING
+
+
+    let mut comandos: Vec<Comando>= Vec::new();
+    for ev in ev_cellresponse.read() {
+        for bm in &ev.0{
+            //aqui allocar en el object_pool y enviar comando para que el shader lo aloque en la grid
+            let indice = object_pool.indice;
+            
+            //si object_pool.data es mayor o igual que OBJECT_POOL_MAX_SIZE significa que hay que reemplazar un brickmap en la posicion indice
+            //de ser menor, solo se agrega al vector
+            if object_pool.data.len()+1 == OBJECT_POOL_MAX_SIZE {
+                //reemplazar
+                //añade el BMAlloc al final del vector
+                object_pool.data.push(BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice });
+                //quita el BMAlloc donde indica el indice y lo reemplaza por el ultimo, que en este caso es el que se añadio anteriormente
+                let removido = object_pool.data.swap_remove(indice as usize);
+
+                comandos.push(Comando { allocar: BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice }, deallocar: removido.bm_idx, datos: Brickmap::cpu_to_gpu(bm.0) });
+                
+
+            }else {
+                //solo agregar
+                object_pool.data.push(BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice });
+
+                //si allocar y deallocar son iguales, no habra deallocacion en la gpu
+                comandos.push(Comando { allocar: BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice }, deallocar: bm.1, datos: Brickmap::cpu_to_gpu(bm.0) });
+            }
+
+
+            //aumentar el indice para que la proxima allocacion sea en una posicion diferente
+            if object_pool.indice < (OBJECT_POOL_MAX_SIZE -1) as u32 {
+                object_pool.indice += 1;
+            }else {
+                object_pool.indice = 0;
+            }
+            
+        }
+    }
+
+    //reemplazar command_buffer con el nuevo vector comandos
+    command_buffer.comandos = comandos;
+
+
+
+
+}
+
+
+//? separar buffer_to_resource() y resource_to_buffer() por cada buffer ? o mantenerlos unidos?
+fn buffer_to_resource(
+    mut variable_data: ResMut<VariableData>,
+    mut feedback_res: ResMut<Feedback>,
+    compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>
+) {
+
+    if !compute_worker.ready() {
+        return
+    }
+    
+    
+    let var_dat: VarData = compute_worker.try_read("variable_data").unwrap();
+    variable_data.data = var_dat;
+
+    let feedback_buffer_data : Vec<NeoUVec3> = compute_worker.try_read_vec("feedback").unwrap();
+    feedback_res.data = feedback_buffer_data;
+
+    
+}
+
+fn resource_to_buffer(
+    mut variable_data: ResMut<VariableData>,
+    mut command_buffer: ResMut<CommandBuffer>,
+    mut compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>
+) {
+
+    if !compute_worker.ready() {
+        return
+    }
+
+    //vaiable_data
+    //...
+
+    
+    
+    //Command_buffer
+    let mut comandos = command_buffer.comandos.clone();
+    let com_len = comandos.len();
+    //let mut com_pad = vec![Comando::default();256 - command_buffer.comandos.len()];
+    //comandos.append(&mut com_pad);
+    let mut aux = [Comando::default();256];
+    for i in 0..com_len{
+        aux[i]= if let Some(x) = comandos.pop() {x} else {continue};
+    }
+    variable_data.data.command_buffer_size = com_len as u32;
+    
+
+
+
+    //CUALQUIER OTRA COSA
+
+
+
+
+    //ESCRITURA
+    compute_worker.write("variable_data", &variable_data.data);
+    compute_worker.write("commands_pool",&aux);
+
+}
+
+//la variable time es inecesaria por ahora
+fn vardata_actualisation(
+    time: Res<Time>,
+    mut variable_data: ResMut<VariableData>,
+    compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>,
+) {
+    if !compute_worker.ready() {
+        return
+    }
+
+    variable_data.data.time = time.elapsed().as_secs() as u32;
 }
 
 fn deteccion_movimiento(
@@ -59,7 +317,8 @@ fn deteccion_movimiento(
     time: Res<Time>,
     mut evr_motion: EventReader<MouseMotion>,
     mut exit: EventWriter<AppExit>,
-    mut compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>,
+    compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>,
+    mut variable_data: ResMut<VariableData>,
     mut camera_t: Query<&mut Transform, (With<MovementCamera>)>,
 ) {
     if !compute_worker.ready() {
@@ -70,9 +329,8 @@ fn deteccion_movimiento(
         return;
     };
 
-    let mut var_dat: VarData = compute_worker.try_read("variable_data").unwrap();
+    let var_dat: &mut VarData = &mut variable_data.data;
     
-
 
     //Aqui cambiar todos los datos necesarios
     let mut direccion: Vec3 = Vec3::ZERO;
@@ -88,7 +346,7 @@ fn deteccion_movimiento(
     if keys.pressed(KeyCode::KeyD) {
         direccion += camera_t.right().as_vec3();
     }
-    let movimineto = direccion.normalize_or_zero() * time.delta_seconds();//multiplicar por un escalar para hacer el movimiento mas rapido/lento
+    let movimineto = direccion.normalize_or_zero() * time.delta_seconds() * 40.;//multiplicar por un escalar para hacer el movimiento mas rapido/lento
     camera_t.translation += movimineto;
     
 
@@ -108,7 +366,7 @@ fn deteccion_movimiento(
         camera_t.rotate_local_x(-ev.delta.y * 0.003);
         
     }
-    let forward = camera_t.forward(); 
+    let forward = camera_t.forward().as_vec3(); 
 
 
     //guardar datos en variable
@@ -116,17 +374,21 @@ fn deteccion_movimiento(
     var_dat.source = NeoVec3::nuevo(camera_t.translation.x,camera_t.translation.y,camera_t.translation.z);
     var_dat.camera_mat = NeoMat4::from_mat4(camera_t.compute_matrix());
     
-    
+    ////!quitar tod lo que tenga que ver con matrix
+    //println!("{:?} {:?}",NeoMat4::from_mat4(camera_t.compute_matrix()),camera_t.compute_matrix());
+
     //println!("source: {:?} + direcction: {:?}",var_dat.source,var_dat.direction);
     let mut cuat = camera_t.rotation.to_euler(EulerRot::XYZ);
     cuat.0 = (cuat.0*180.)/PI;
     cuat.1 = (cuat.1*180.)/PI;
     cuat.2 = (cuat.2*180.)/PI;
 
-    println!("{:?}",cuat);
+    //println!("{:?}",cuat);
+
+    //println!("translation: {:?}, forward: {:?}",camera_t.translation,camera_t.forward().as_vec3());
     
     //escribir variables en bvuffer
-    compute_worker.write("variable_data", &var_dat);
+    //compute_worker.write("variable_data", &var_dat);
 
 
 
@@ -147,8 +409,8 @@ fn camera3Dsetup(
                 order: 1,
                 ..default()
             },
-            transform: Transform::from_xyz(126., 126., 126.)
-                .looking_at(-Vec3::Z, Vec3::Y),
+            transform: Transform::from_xyz(126., 126., 126.),
+                //.looking_at(-Vec3::Z, Vec3::Y),//esto hace que la camara mire hacia una ezquina!?
             
             camera_3d: Camera3d {
                 ..default()
@@ -161,48 +423,6 @@ fn camera3Dsetup(
 
 }
 
-//al parecer, tener dos sistemas que lleen y escriben en un mismo buffer los contraresta?
-fn movimiento_mouse(
-    mut evr_motion: EventReader<MouseMotion>,
-    mut compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>,
-) {
-
-    if !compute_worker.ready() {
-        return
-    }
-
-    let mut var_dat: VarData = compute_worker.try_read("variable_data").unwrap();
-    //let mut cam_vec: Vec<f32> = vec![var_dat.source.x,var_dat.source.y,var_dat.source.z];
-
-    //let mut theta = var_dat.source.x.atan2(var_dat.source.z);
-
-    //let mut thwta2 = 0;
-
-    //let cs = theta.cos();
-    //let sn = theta.sin();
-
-
-    /* 
-    for ev in evr_motion.read() {
-        let theta = var_dat.direction.x.atan2(var_dat.direction.z) + 0.11;
-        let cs = theta.cos();
-        let sn = theta.sin();
-        let newx = var_dat.direction.x * cs - var_dat.direction.z * sn;
-        let newz = var_dat.direction.x * sn + var_dat.direction.z * cs;
-        var_dat.direction.x = newx;
-        var_dat.direction.z = newz;
-        println!("{:?}", var_dat.direction);
-    }
-    */
-    for ev in evr_motion.read() {
-        var_dat.direction.x = var_dat.direction.x + ev.delta.x;
-        var_dat.direction.z = var_dat.direction.z + ev.delta.y;
-    }
-
-    compute_worker.write("variable_data", &var_dat);
-
-}
-
 fn cursor_grab(
     mut q_windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
@@ -210,7 +430,7 @@ fn cursor_grab(
 
     primary_window.cursor.grab_mode = CursorGrabMode::Locked;
 
-    //primary_window.cursor.visible = false;
+    primary_window.cursor.visible = false;
 }
 
 #[derive(TypePath)]
@@ -221,163 +441,18 @@ impl ComputeShader for VoxelRenderShader {
     }
 }
 
-//SOLO usar vec3 o similares si el struct no sera reenviado al cpu y solo se leera en gpu
-#[repr(C)]
-#[derive(ShaderType,Debug,AnyBitPattern,Clone, Copy)]
-struct InitData{
-    imagen_height : u32,
-    imagen_width : u32
-}
-
-
-#[repr(C)]
-#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
-struct NeoVec3{
-    x: f32,
-    y: f32,
-    z: f32
-}
-impl Default for NeoVec3{
-    fn default() -> Self {
-        NeoVec3{
-            x: 0.,
-            y: 0.,
-            z: 0.
-        }
-    }
-}
-impl NeoVec3 {
-    fn forward() -> Self {
-        NeoVec3{
-            x: 0.,
-            y: 0.,
-            z: -1.
-        }
-    }
-    fn nuevo(x:f32, y:f32, z:f32) -> Self {
-        NeoVec3{
-            x,
-            y,
-            z
-        }
+#[derive(TypePath)]
+struct VoxelAllocatorShader;
+impl ComputeShader for VoxelAllocatorShader {
+    fn shader() -> ShaderRef {
+        ALLOCATOR_SHADER_PATH.into()
     }
 }
 
-#[repr(C)]
-#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
-struct NeoVec4{
-    x: f32,
-    y: f32,
-    z: f32,
-    w: f32
-}
-impl Default for NeoVec4{
-    fn default() -> Self {
-        NeoVec4{
-            x: 0.,
-            y: 0.,
-            z: 0.,
-            w: 0.
-        }
-    }
-}
-impl NeoVec4 {
-    fn nuevo(x:f32, y:f32, z:f32, w:f32) -> Self {
-        NeoVec4{
-            x,
-            y,
-            z,
-            w
-        }
-    }
-
-    fn from_vec4(aux: &[f32;4]) -> Self {
-        NeoVec4{x:aux[0],y:aux[1],z:aux[2],w:aux[3]}
-    }
-}
-
-#[repr(C)]
-#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
-struct NeoUVec3{
-    x: u32,
-    y: u32,
-    z: u32
-}
-impl Default for NeoUVec3{
-    fn default() -> Self {
-        NeoUVec3{
-            x: 0,
-            y: 0,
-            z: 0
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
-struct NeoMat4{
-    x_axis: NeoVec4,
-    y_axis: NeoVec4,
-    z_axis: NeoVec4,
-    w_axis: NeoVec4,
-}
-impl NeoMat4 {
-    fn IDENTITY() -> Self {
-        NeoMat4{
-            x_axis: NeoVec4{x: 1., y: 0., z: 0., w: 0.},
-            y_axis: NeoVec4{x: 0., y: 1., z: 0., w: 0.},
-            z_axis: NeoVec4{x: 0., y: 0., z: 1., w: 0.},
-            w_axis: NeoVec4{x: 0., y: 0., z: 0., w: 1.},
-        }
-    }
-    fn from_mat4(aux : Mat4) -> Self{
-        NeoMat4 {
-            x_axis: NeoVec4::from_vec4(&aux.x_axis.to_array()),
-            y_axis: NeoVec4::from_vec4(&aux.y_axis.to_array()),
-            z_axis: NeoVec4::from_vec4(&aux.z_axis.to_array()),
-            w_axis: NeoVec4::from_vec4(&aux.w_axis.to_array()) 
-        }
-    }
-}
-
-
-
-#[repr(C)]
-#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
-struct VarData{
-    source : NeoVec3,//donde esta la camara en el mundo
-    direction: NeoVec3,//direccion a la que esta mirando la camara
-    fov: f32,//field of view, por ahora es f32
-    used_buffer: u32, //atomico encargado de dictar a que indice del feedback_buffer escribir y leer;
-    time: u32,
-    camera_mat: NeoMat4
-}
-
-//TODO: mover a voxel shader para ser usado por voxel_engine
-///!solo usar para pruebas
-#[repr(C)]
-#[derive(ShaderType,Debug,AnyBitPattern,Clone, Copy)]
-struct Brickmap {
-    datos: [u32;128] //(u32)2x8 -> 8x8x8
-}
-
-impl Default for Brickmap {
-    fn default() -> Self {
-        Brickmap{
-            datos: [0 as u32;128]
-        }
-    }
-
-
-}
-
-
-
-
+//ALLOCATOR_SHADER_PATH
 
 //cambiar dependiendo de la vram de la gpu y el ratio brickmap-=-colorData
 const BD_SIZE: usize = 1000;
-
 
 #[derive(Resource)]
 struct VoxelRenderWorker;
@@ -386,15 +461,17 @@ impl ComputeWorker for VoxelRenderWorker {
         let init_data: InitData= InitData{
             imagen_height: SIZE.0/64,
             imagen_width: SIZE.1/64,
+            feedback_buffer_size: FEEDBACK_BUFFER_SIZE as u32
         };
 
         let mut var_data: VarData= VarData{
             source: NeoVec3::nuevo(50.,50.,10.),//Vec3 { x: 0., y: 0., z: 0. },
             direction: NeoVec3::nuevo(0.,0.,-1.),//Vec3 { x: 0., y: 0., z: -1. },
             fov: 50.,
-            used_buffer: 0,
+            camera_mat: NeoMat4::IDENTITY(),
             time: 0,
-            camera_mat: NeoMat4::IDENTITY()
+            feedback_idx: 0,
+            command_buffer_size: 0
         };
         var_data.source.x = 126.;
         var_data.source.y = 126.;
@@ -423,13 +500,15 @@ impl ComputeWorker for VoxelRenderWorker {
         let camera_transform: Mat4 = Mat4::IDENTITY;
 
         let worker = AppComputeWorkerBuilder::new(world)
-        .add_uniform("data_struct",&init_data)
+        .add_uniform("uniform_data",&init_data)
         .add_staging("variable_data", &var_data)
         .add_staging("imagen", &blank_image)
         .add_rw_storage("brickgrid", &[def_brickgrid_cell;ws as usize])
-        .add_staging("brickmap_data", &[Brickmap::default();BD_SIZE])
-        .add_rw_storage("feedback", &[NeoUVec3::default();FEEDBACK_BUFFER_SIZE])
-        .add_pass::<VoxelRenderShader>([512,512,1],&["data_struct","variable_data","imagen","brickgrid","brickmap_data","feedback"])
+        .add_rw_storage("brickmap_data", &[Brickmap::default();BD_SIZE])
+        .add_staging("feedback", &[NeoUVec3::default();FEEDBACK_BUFFER_SIZE])
+        .add_staging("commands_pool",&[Comando::default();256])
+        .add_pass::<VoxelAllocatorShader>([256,1,1], &["variable_data","commands_pool","brickgrid","brickmap_data"])
+        .add_pass::<VoxelRenderShader>([512,512,1],&["uniform_data","variable_data","imagen","brickgrid","brickmap_data","feedback"])
         .build();
 
         worker
@@ -485,35 +564,6 @@ fn test (
     var_dat.time = tim;
 
     compute_worker.write("variable_data", &var_dat);
-}
-
-fn read_feedback(
-    compute_worker: ResMut<AppComputeWorker::<VoxelRenderWorker>>,
-) {
-    if !compute_worker.ready() {
-        return
-    }
-
-    //TODO?; crear recurso en donde guardar el struct VarData
-    // y crear systema que se ejecute al final del todo que lea el recurso y lo escriba en el buffer
-    ////! de no hacerlo podria causar que se pierda informacion entre los systemas que usan este struct
-
-    let vardat: VarData = compute_worker.read("variable_data");
-    let feedback: Vec<NeoUVec3> = compute_worker.read_vec("feedback");
-
-
-
-
-
-
-
-
-
-
-    //Aqui ver como pedir y recivir brickmaps para despues enviarlos
-
-
-
 }
 
 fn actualizar_imagen(
