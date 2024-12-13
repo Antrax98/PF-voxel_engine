@@ -14,7 +14,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 
 const COMPUTE_SHADER_PATH: &str = "shaders/voxel_processor.wgsl";
-const ALLOCATOR_SHADER_PATH: &str = "shader/voxel_allocator.wgsl";
+const ALLOCATOR_SHADER_PATH: &str = "shaders/voxel_allocator.wgsl";
 
 //Tamaño de la ventana
 //TODO: obtener el valor a travez del AddPlugins() Params
@@ -27,7 +27,7 @@ const WORKGROUP_SIZE: u32 = 8;
 
 const FEEDBACK_BUFFER_SIZE: usize = 256;
 
-const OBJECT_POOL_MAX_SIZE: usize = 15000000; //aprox 1GB
+const OBJECT_POOL_MAX_SIZE: usize = 100000; //aprox 1GB
 
 
 pub struct VoxelRenderPlugin;
@@ -151,6 +151,7 @@ pub struct Comando{
     pub allocar: BMAlloc,
     pub deallocar: u32,
     pub datos: Brickmap,
+    pub com : u32
 }
 impl Default for Comando{
     fn default() -> Self {
@@ -158,9 +159,13 @@ impl Default for Comando{
             allocar: BMAlloc{bm_idx:0,bm_buffer_idx:0},
             deallocar: 0,
             datos: Brickmap::default(),
+            com: 0
         }
     }
 }
+
+//com = 1 -> tiene datos
+//com = 0 -> no tiene datos de brickmap
 
 #[repr(C)]
 #[derive(ShaderType,Debug,Pod,Zeroable,Clone, Copy)]
@@ -195,36 +200,56 @@ fn cell_receiver_allocator(
     let mut comandos: Vec<Comando>= Vec::new();
     for ev in ev_cellresponse.read() {
         for bm in &ev.0{
-            //aqui allocar en el object_pool y enviar comando para que el shader lo aloque en la grid
-            let indice = object_pool.indice;
-            
-            //si object_pool.data es mayor o igual que OBJECT_POOL_MAX_SIZE significa que hay que reemplazar un brickmap en la posicion indice
-            //de ser menor, solo se agrega al vector
-            if object_pool.data.len()+1 == OBJECT_POOL_MAX_SIZE {
-                //reemplazar
-                //añade el BMAlloc al final del vector
-                object_pool.data.push(BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice });
-                //quita el BMAlloc donde indica el indice y lo reemplaza por el ultimo, que en este caso es el que se añadio anteriormente
-                let removido = object_pool.data.swap_remove(indice as usize);
 
-                comandos.push(Comando { allocar: BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice }, deallocar: removido.bm_idx, datos: Brickmap::cpu_to_gpu(bm.0) });
+            //TODO: AQUI CREAR COMANDO SI EL BRICKMAP ESTA VACIO
+            //USAR OPTION
+
+            match bm.0 {
+                None => {
+                    
+                    //este comando hara que se aloquen solo en el brickmap grig un puntero que dira vacio
+                    comandos.push(Comando { allocar: BMAlloc { bm_idx: bm.1, bm_buffer_idx: 0 }, deallocar: bm.1, datos: Brickmap::cpu_to_gpu(BrickMap::default()), com: 0 });
+                    continue;
+
+                },
+                Some(brick) => {
+
+                    //aqui allocar en el object_pool y enviar comando para que el shader lo aloque en la grid
+                let indice = object_pool.indice;
+            
+                //si object_pool.data es mayor o igual que OBJECT_POOL_MAX_SIZE significa que hay que reemplazar un brickmap en la posicion indice
+                //de ser menor, solo se agrega al vector
+                if object_pool.data.len()+1 == OBJECT_POOL_MAX_SIZE {
+                    //reemplazar
+                    //añade el BMAlloc al final del vector
+                    object_pool.data.push(BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice });
+                    //quita el BMAlloc donde indica el indice y lo reemplaza por el ultimo, que en este caso es el que se añadio anteriormente
+                    let removido = object_pool.data.swap_remove(indice as usize);
+
+                    comandos.push(Comando { allocar: BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice }, deallocar: removido.bm_idx, datos: Brickmap::cpu_to_gpu(brick),com: 1 });
                 
 
-            }else {
-                //solo agregar
-                object_pool.data.push(BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice });
+                }else {
+                    //solo agregar
+                    object_pool.data.push(BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice });
 
-                //si allocar y deallocar son iguales, no habra deallocacion en la gpu
-                comandos.push(Comando { allocar: BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice }, deallocar: bm.1, datos: Brickmap::cpu_to_gpu(bm.0) });
+                    //si allocar y deallocar son iguales, no habra deallocacion en la gpu
+                    comandos.push(Comando { allocar: BMAlloc { bm_idx: bm.1, bm_buffer_idx: indice }, deallocar: bm.1, datos: Brickmap::cpu_to_gpu(brick),com: 1 });
+                }
+
+
+                //aumentar el indice para que la proxima allocacion sea en una posicion diferente
+                if object_pool.indice < (OBJECT_POOL_MAX_SIZE -1) as u32 {
+                    object_pool.indice += 1;
+                }else {
+                    object_pool.indice = 0;
+                }
+
+                    }
             }
 
 
-            //aumentar el indice para que la proxima allocacion sea en una posicion diferente
-            if object_pool.indice < (OBJECT_POOL_MAX_SIZE -1) as u32 {
-                object_pool.indice += 1;
-            }else {
-                object_pool.indice = 0;
-            }
+            
             
         }
     }
@@ -277,9 +302,13 @@ fn resource_to_buffer(
     //Command_buffer
     let mut comandos = command_buffer.comandos.clone();
     let com_len = comandos.len();
+    if com_len >= 255{
+        println!("Demasiados comandos {:?}",com_len);
+    }
     //let mut com_pad = vec![Comando::default();256 - command_buffer.comandos.len()];
     //comandos.append(&mut com_pad);
-    let mut aux = [Comando::default();256];
+    //el buffer de los comandos deve ser el doble de grande que el feedvack devido a que pueden quedarse 
+    let mut aux = [Comando::default();FEEDBACK_BUFFER_SIZE*2];
     for i in 0..com_len{
         aux[i]= if let Some(x) = comandos.pop() {x} else {continue};
     }
@@ -452,16 +481,26 @@ impl ComputeShader for VoxelAllocatorShader {
 //ALLOCATOR_SHADER_PATH
 
 //cambiar dependiendo de la vram de la gpu y el ratio brickmap-=-colorData
-const BD_SIZE: usize = 1000;
+const BD_SIZE: usize = OBJECT_POOL_MAX_SIZE;
+//antes era 1000
 
 #[derive(Resource)]
 struct VoxelRenderWorker;
 impl ComputeWorker for VoxelRenderWorker {
     fn build(world: &mut World) -> AppComputeWorker<Self> {
+        // let init_data: InitData= InitData{
+        //     imagen_height: SIZE.0/64,
+        //     imagen_width: SIZE.1/64,
+        //     feedback_buffer_size: FEEDBACK_BUFFER_SIZE as u32,
+        //     world_size: NeoUVec4 { x: WORLD_SIZE.0, y: WORLD_SIZE.1, z: WORLD_SIZE.2, w:0}
+        // };
         let init_data: InitData= InitData{
             imagen_height: SIZE.0/64,
             imagen_width: SIZE.1/64,
-            feedback_buffer_size: FEEDBACK_BUFFER_SIZE as u32
+            feedback_buffer_size: FEEDBACK_BUFFER_SIZE as u32,
+            world_size_x: WORLD_SIZE.0,
+            world_size_y: WORLD_SIZE.1,
+            world_size_z: WORLD_SIZE.2
         };
 
         let mut var_data: VarData= VarData{
@@ -477,14 +516,14 @@ impl ComputeWorker for VoxelRenderWorker {
         var_data.source.y = 126.;
         var_data.source.z = 126.; 
 
-        let blank_image = [0 as u32;(SIZE.0 as usize)*(SIZE.1 as usize)];
+        let blank_image = &[0 as u32;(SIZE.0 as usize)*(SIZE.1 as usize)];
 
 
         const ws :u32 = WORLD_SIZE.0*WORLD_SIZE.1*WORLD_SIZE.2;
 
         //byte 1 2 y 3 = Rgb LOD, byte 4 = flags
         //flags 00000000 = empty
-        const def_brickgrid_cell: u32= 0xff0000ff;//0b00000000_00000000_00000000_00000000
+        const def_brickgrid_cell: u32= 0x355f9502;//0b00000000_00000000_00000000_00000000
 
         #[repr(C)]
         #[derive(ShaderType,Debug,AnyBitPattern,Clone, Copy)]
@@ -506,8 +545,8 @@ impl ComputeWorker for VoxelRenderWorker {
         .add_rw_storage("brickgrid", &[def_brickgrid_cell;ws as usize])
         .add_rw_storage("brickmap_data", &[Brickmap::default();BD_SIZE])
         .add_staging("feedback", &[NeoUVec3::default();FEEDBACK_BUFFER_SIZE])
-        .add_staging("commands_pool",&[Comando::default();256])
-        .add_pass::<VoxelAllocatorShader>([256,1,1], &["variable_data","commands_pool","brickgrid","brickmap_data"])
+        .add_staging("commands_pool",&[Comando::default();FEEDBACK_BUFFER_SIZE *2])
+        .add_pass::<VoxelAllocatorShader>([FEEDBACK_BUFFER_SIZE as u32 *2,1,1], &["variable_data","commands_pool","brickgrid","brickmap_data"])
         .add_pass::<VoxelRenderShader>([512,512,1],&["uniform_data","variable_data","imagen","brickgrid","brickmap_data","feedback"])
         .build();
 
@@ -690,19 +729,4 @@ fn vec32_to_imagedata(v:&Vec<u32>) -> Vec<u8>{
     resultado
 }
 
-fn brickgrid_test_creation(world_size: usize) -> (Vec<u32>,Vec<Brickmap>) {
-    let mut resultado: (Vec<u32>,Vec<Brickmap>) = (Vec::with_capacity(world_size),Vec::with_capacity(world_size));
-    
-    resultado.0 = vec![0x00000000 as u32;world_size];
-    resultado.1 = vec![Brickmap::default();world_size];
 
-
-
-
-
-
-
-
-
-    resultado
-}

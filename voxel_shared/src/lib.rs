@@ -1,4 +1,4 @@
-use bevy::{math::{Mat4, UVec3}, prelude::{Component, Event}, render::render_resource::ShaderType, utils::hashbrown::HashMap};
+use bevy::{math::{Mat4, UVec3}, prelude::{Component, Event}, render::render_resource::{ShaderSize, ShaderType}, utils::hashbrown::HashMap};
 use bitvec::prelude::*;
 use bytemuck::{AnyBitPattern, NoUninit, Pod, Zeroable};
 
@@ -89,11 +89,14 @@ pub struct VoxelWorld {
 
 //SOLO usar vec3 o similares si el struct no sera reenviado al cpu y solo se leera en gpu
 #[repr(C)]
-#[derive(ShaderType,Debug,AnyBitPattern,Clone, Copy)]
+#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
 pub struct InitData{
     pub imagen_height : u32,
     pub imagen_width : u32,
-    pub feedback_buffer_size : u32
+    pub feedback_buffer_size : u32,
+    pub world_size_x : u32,
+    pub world_size_y : u32,
+    pub world_size_z : u32,
 }
 
 
@@ -129,6 +132,8 @@ impl NeoVec3 {
         }
     }
 }
+
+
 
 #[repr(C)]
 #[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
@@ -176,6 +181,25 @@ impl Default for NeoUVec3{
             x: 0,
             y: 0,
             z: 0
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(ShaderType,Debug,AnyBitPattern, NoUninit,Clone, Copy)]
+pub struct NeoUVec4{
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub w: u32
+}
+impl Default for NeoUVec4{
+    fn default() -> Self {
+        NeoUVec4{
+            x: 0,
+            y: 0,
+            z: 0,
+            w: 0
         }
     }
 }
@@ -260,10 +284,10 @@ impl Brickmap {
 pub struct CellsRequest(pub Vec<NeoUVec3>);
 
 #[derive(Event,Debug)]
-pub struct CellsResponse(pub Vec<(BrickMap,u32)>);
+pub struct CellsResponse(pub Vec<(Option<BrickMap>,u32)>);
 
 
 //tamaño en brickmaps
-//multiplos de 16
+//multiplos de 16 para que coincida con los chunks
 //TODO: obtener el valor al iniciar el ejecutable
 pub const WORLD_SIZE: (u32,u32,u32)= (256,256,256);

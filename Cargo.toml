@@ -12,4 +12,4 @@ members = [
 # 0 > sin optimisacion (25fps aprox)
 # 1 > (60fps)
 [profile.dev]
-opt-level = 3
+opt-level = 2

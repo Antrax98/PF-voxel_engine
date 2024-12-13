@@ -1,11 +1,14 @@
-struct brickmap {
+struct Brickmap {
     datos: array<u32,16>,
 }
 
 struct InitData {
     imagen_height: u32,
     imagen_width: u32,
-    feedback_buffer_size : u32
+    feedback_buffer_size : u32,
+    world_size_x: u32,
+    world_size_y: u32,
+    world_size_z: u32,
 }
 
 struct NeoVec3{
@@ -18,6 +21,13 @@ struct NeoUVec3{
     x: u32,
     y: u32,
     z: u32
+}
+
+struct NeoUVec4{
+    x: u32,
+    y: u32,
+    z: u32,
+    w: u32
 }
 
 struct NeoVec4{
@@ -72,7 +82,7 @@ var<storage, read_write> imagen: array<u32>;
 var<storage, read_write> brickgrid: array<u32>;// grid de 256x256x256 Cells POR AHORA
 
 @group(0) @binding(4)
-var<storage, read_write> brickmap_data: array<brickmap>;//brickmaps alocados
+var<storage, read_write> brickmap_data: array<Brickmap>;//brickmaps alocados
 
 @group(0) @binding(5)
 var<storage, read_write> feedback : array<NeoUVec3>; // feedback de solo escritura en gpu
@@ -126,7 +136,7 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
 
     var rayo :Ray = crear_rayo(invocation_id.x,invocation_id.y,512u,512u,camara);
 
-    let hit = neo_raymarching(rayo,pixel);
+    let hit = extra_neo_raymarching(rayo,pixel);
 
 
     if (hit) {
@@ -306,103 +316,103 @@ fn crear_rayo(x: u32, y: u32, width: u32, height: u32, camera: Camera) -> Ray{
 
 
 //a primera vista, el cambio de algoritmo no dio un cambio significativo al rendimiento
-fn nc_neo_raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
+// fn nc_neo_raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
 
-    var rayo: Ray = ray;
+//     var rayo: Ray = ray;
 
-    let MAX_RAY_STEPS: u32 = 500u;
+//     let MAX_RAY_STEPS: u32 = 500u;
 
-    //TODO: obtener coordenadas en caso de que el rayo se origine fuera del mundo voxel
-    //ejemplo: de tener un mundo cubico de 250+, si el rayo se origina desde una coordenada negativa,
-    //este estaria fuera del mundo y seria necesario un nuevo proceso para obtener a cual voxel apunta primero.
+//     //TODO: obtener coordenadas en caso de que el rayo se origine fuera del mundo voxel
+//     //ejemplo: de tener un mundo cubico de 250+, si el rayo se origina desde una coordenada negativa,
+//     //este estaria fuera del mundo y seria necesario un nuevo proceso para obtener a cual voxel apunta primero.
 
-    var ray_origin_grid: vec3<f32> = floor(ray.source); // starting voxel coordinates
+//     var ray_origin_grid: vec3<f32> = floor(ray.source); // starting voxel coordinates
     
 
-    //esto se encarga de, en caso que xyz no sean igual a zero
-    if(rayo.direction.x == 0.0){
-        rayo.direction.x += 0.0001;
-    }
-    if(rayo.direction.y == 0.0){
-        rayo.direction.y += 0.0001;
-    }
-    if(rayo.direction.z == 0.0){
-        rayo.direction.z += 0.0001;
-    }
-    rayo.direction = normalize(rayo.direction);
+//     //esto se encarga de, en caso que xyz no sean igual a zero
+//     if(rayo.direction.x == 0.0){
+//         rayo.direction.x += 0.0001;
+//     }
+//     if(rayo.direction.y == 0.0){
+//         rayo.direction.y += 0.0001;
+//     }
+//     if(rayo.direction.z == 0.0){
+//         rayo.direction.z += 0.0001;
+//     }
+//     rayo.direction = normalize(rayo.direction);
 
 
-    //aqui se obtiene el signo de cada valor de la direccion, de modo que se sepa si se debe aumentar o disminuir
-    //en el axis que se este calculando en el momento
-    //* el vector ray_sign y ray_signf son lo mismo que stepX,stepY,stepZ en un solo vector (habra que separarlos???)
-    var ray_signf: vec3<f32> = sign(rayo.direction);
-    var ray_sign: vec3<i32> = vec3<i32>(i32(ray_signf.x),i32(ray_signf.y),i32(ray_signf.z));
-    //var ray_step: vec3<f32> = 1./rayo.direction; //si no funciona, hacerlo por cada valor;
+//     //aqui se obtiene el signo de cada valor de la direccion, de modo que se sepa si se debe aumentar o disminuir
+//     //en el axis que se este calculando en el momento
+//     //* el vector ray_sign y ray_signf son lo mismo que stepX,stepY,stepZ en un solo vector (habra que separarlos???)
+//     var ray_signf: vec3<f32> = sign(rayo.direction);
+//     var ray_sign: vec3<i32> = vec3<i32>(i32(ray_signf.x),i32(ray_signf.y),i32(ray_signf.z));
+//     //var ray_step: vec3<f32> = 1./rayo.direction; //si no funciona, hacerlo por cada valor;
 
     
 
 
 
-    //t_delta xyz deverian multiplicarse por el tamaño del voxel, pero como por ahora el voxel es de tamaño 1 no hay que multiplicarlo //*(por ahora)
-    var t_delta: vec3<f32> = vec3<f32>(
-        length(rayo.direction * (1/rayo.direction.x)),
-        length(rayo.direction * (1/rayo.direction.y)),
-        length(rayo.direction * (1/rayo.direction.z))
-    );
+//     //t_delta xyz deverian multiplicarse por el tamaño del voxel, pero como por ahora el voxel es de tamaño 1 no hay que multiplicarlo //*(por ahora)
+//     var t_delta: vec3<f32> = vec3<f32>(
+//         length(rayo.direction * (1/rayo.direction.x)),
+//         length(rayo.direction * (1/rayo.direction.y)),
+//         length(rayo.direction * (1/rayo.direction.z))
+//     );
 
-    let offset: vec3<f32> = ray_signf - (ray.source - ray_origin_grid);//hecho por mi //? puede estar roto
+//     let offset: vec3<f32> = ray_signf - (ray.source - ray_origin_grid);//hecho por mi //? puede estar roto
 
 
-    //este representa al t_max solo al inicio, ya que sera modificado dentro del loop
-    var t_max: vec3<f32> = t_delta * offset;
+//     //este representa al t_max solo al inicio, ya que sera modificado dentro del loop
+//     var t_max: vec3<f32> = t_delta * offset;
 
-    //coordenadas del voxel en las que se comiensa
-    var voxel_coords: vec3<i32> = vec3<i32>(i32(ray_origin_grid.x),i32(ray_origin_grid.y),i32(ray_origin_grid.z));
+//     //coordenadas del voxel en las que se comiensa
+//     var voxel_coords: vec3<i32> = vec3<i32>(i32(ray_origin_grid.x),i32(ray_origin_grid.y),i32(ray_origin_grid.z));
 
-    //*DESDE AQUI ES NUEVO
+//     //*DESDE AQUI ES NUEVO
 
-    var voxel_incr: vec3<bool> = vec3<bool>(false,false,false);
+//     var voxel_incr: vec3<bool> = vec3<bool>(false,false,false);
     
-    for(var i=0u; i< MAX_RAY_STEPS;i++){
+//     for(var i=0u; i< MAX_RAY_STEPS;i++){
 
-        //!necesario crear una solucion similar para cada nivel (parecido a como se hara con is_voxel_filled() )
-        if(voxel_coords.x>255 || voxel_coords.y>255 || voxel_coords.z>255 || voxel_coords.x<0 || voxel_coords.y<0 || voxel_coords.z<0){
-            asign_color(pixel,0x00ff00ffu);//VERDE
-            return true;
-        }
+//         //!necesario crear una solucion similar para cada nivel (parecido a como se hara con is_voxel_filled() )
+//         if(voxel_coords.x>255 || voxel_coords.y>255 || voxel_coords.z>255 || voxel_coords.x<0 || voxel_coords.y<0 || voxel_coords.z<0){
+//             asign_color(pixel,0x00ff00ffu);//VERDE
+//             return true;
+//         }
 
-        //! SOLO POR AHORA
-        if(work_brickcell(voxel_coords)){
-            return true;
-        }
+//         //! SOLO POR AHORA
+//         if(work_brickcell(voxel_coords)){
+//             return true;
+//         }
 
-        //! cambiar como funciona is_voxel_filled() dependieondo del nivel en el que este (crear una funcion por cada nivel???)
-        //brickmap -> revisara dentro del brickmap si el voxel el true o false (revisa el mismicimo brickmap)
-        //brickcell -> revisara si existe un brickmap o si es una cell vacia (revisa dentro de las alocaciones)
-        //celda superior 1 -> revisara si existe algun brickcell o si esta vacia (esta es solo un true/false)
-        //TODO: de existir algo, se deve adentrarse e iniciar un nuevo 3d dda
-        //? explorar como interpretar la escala del mundo (asi como multiplicar o dividir la pocicion de la camara y los rayos por cada nivel)
-        if(is_voxel_filled(voxel_coords) != 0u){
-            //! DEJAR DE UTILIZAR is_voxel_filled() COMO OBTENEDOR DE COLORES Y CREAR UNA FUNCION PARA CADA CASO NECESARIO
-            asign_color(pixel,is_voxel_filled(voxel_coords));
-            return true;
-        }
+//         //! cambiar como funciona is_voxel_filled() dependieondo del nivel en el que este (crear una funcion por cada nivel???)
+//         //brickmap -> revisara dentro del brickmap si el voxel el true o false (revisa el mismicimo brickmap)
+//         //brickcell -> revisara si existe un brickmap o si es una cell vacia (revisa dentro de las alocaciones)
+//         //celda superior 1 -> revisara si existe algun brickcell o si esta vacia (esta es solo un true/false)
+//         //TODO: de existir algo, se deve adentrarse e iniciar un nuevo 3d dda
+//         //? explorar como interpretar la escala del mundo (asi como multiplicar o dividir la pocicion de la camara y los rayos por cada nivel)
+//         if(is_voxel_filled(voxel_coords) != 0u){
+//             //! DEJAR DE UTILIZAR is_voxel_filled() COMO OBTENEDOR DE COLORES Y CREAR UNA FUNCION PARA CADA CASO NECESARIO
+//             asign_color(pixel,is_voxel_filled(voxel_coords));
+//             return true;
+//         }
 
-        voxel_incr.x = (t_max.x<=t_max.y) && (t_max.x<=t_max.z);
-        voxel_incr.y = (t_max.y<=t_max.x) && (t_max.y<=t_max.z);
-        voxel_incr.z = (t_max.z<=t_max.x) && (t_max.z<=t_max.y);
+//         voxel_incr.x = (t_max.x<=t_max.y) && (t_max.x<=t_max.z);
+//         voxel_incr.y = (t_max.y<=t_max.x) && (t_max.y<=t_max.z);
+//         voxel_incr.z = (t_max.z<=t_max.x) && (t_max.z<=t_max.y);
 
-        t_max.x += f32(voxel_incr.x) * t_delta.x;
-        t_max.y += f32(voxel_incr.y) * t_delta.y;
-        t_max.z += f32(voxel_incr.z) * t_delta.z;
+//         t_max.x += f32(voxel_incr.x) * t_delta.x;
+//         t_max.y += f32(voxel_incr.y) * t_delta.y;
+//         t_max.z += f32(voxel_incr.z) * t_delta.z;
 
-        voxel_coords.x += i32(voxel_incr.x) * ray_sign.x;
-        voxel_coords.y += i32(voxel_incr.y) * ray_sign.y;
-        voxel_coords.z += i32(voxel_incr.z) * ray_sign.z;
+//         voxel_coords.x += i32(voxel_incr.x) * ray_sign.x;
+//         voxel_coords.y += i32(voxel_incr.y) * ray_sign.y;
+//         voxel_coords.z += i32(voxel_incr.z) * ray_sign.z;
 
-    }
-    return false;
-}
+//     }
+//     return false;
+// }
 
 //* EL QUE SE USA ACTUALMENTE
 //faltan algunos calculos a la hora de hacer el hit
@@ -470,10 +480,10 @@ fn neo_raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
         }
 
 
-        //! SOLO POR AHORA
-        if(work_brickcell(voxel_coords)){
-            return true;
-        }
+        // //! SOLO POR AHORA
+        // if(work_brickcell(voxel_coords, pixel)){
+        //     return true;
+        // }
 
 
         //! cambiar como funciona is_voxel_filled() dependieondo del nivel en el que este (crear una funcion por cada nivel???)
@@ -513,28 +523,348 @@ fn neo_raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
     return false;
 }
 
-//funcion que encapsula el trabajo necesario para un Brickcell y navegar el Brickmap
-fn work_brickcell(cell_coords: vec3<i32>) -> bool {
+//* ESTE FUNCIONA PARA ENTRAR EN LOS BRICKMAPS
+fn extra_neo_raymarching(ray: Ray, pixel: vec2<u32>) -> bool {
+    let wz: NeoUVec3 = NeoUVec3(init_data.world_size_x,init_data.world_size_y,init_data.world_size_z);
+    //let wz: NeoUVec3 = init_data.world_size;
+    
+    //raymarching que navega el brickgrid
+    //de ser necesario(pero poco probable) hacer algo parecido si se añade matris de orden superior
+
+    var rayo : Ray = ray;
+
+    let MAX_RAY_STEPS: u32 = 500u;
     
 
+    //esto se encarga de, en caso que xyz no sean igual a zero
+    if(rayo.direction.x == 0.0){
+        rayo.direction.x += 0.0001;
+    }
+    if(rayo.direction.y == 0.0){
+        rayo.direction.y += 0.0001;
+    }
+    if(rayo.direction.z == 0.0){
+        rayo.direction.z += 0.0001;
+    }
+    rayo.direction = normalize(rayo.direction);
+
+
+    
+
+    //aqui se obtiene el signo de cada valor de la direccion, de modo que se sepa si se debe aumentar o disminuir
+    //en el axis que se este calculando en el momento
+    //* el vector ray_sign y ray_signf son lo mismo que stepX,stepY,stepZ en un solo vector (habra que separarlos???)
+    var ray_signf: vec3<f32> = sign(rayo.direction);
+    var ray_sign: vec3<i32> = vec3<i32>(i32(ray_signf.x),i32(ray_signf.y),i32(ray_signf.z));
+    //var ray_step: vec3<f32> = 1./rayo.direction; //si no funciona, hacerlo por cada valor;
+
+
+    //t_delta xyz deverian multiplicarse por el tamaño del voxel, pero como por ahora el voxel es de tamaño 1 no hay que multiplicarlo //*(por ahora)
+    var t_delta: vec3<f32> = vec3<f32>(
+        length(rayo.direction * (1/rayo.direction.x)),
+        length(rayo.direction * (1/rayo.direction.y)),
+        length(rayo.direction * (1/rayo.direction.z))
+    );
 
 
 
+    //!INICIO DEL BOUNDING BOX
+    //TODO: obtener coordenadas en caso de que el rayo se origine fuera del mundo voxel
+    //ejemplo: de tener un mundo cubico de 250+, si el rayo se origina desde una coordenada negativa,
+    //este estaria fuera del mundo y seria necesario un nuevo proceso para obtener a cual voxel apunta primero.
+    //modificar el ray.source para simular que el rayo empieza justo al borde del mundo
+    //solo es necesario q ue se haga una vez por rayo
+
+    // se usa el algorithmo bounding box intersection
+    let box_min: vec3<f32> = vec3<f32>(0.,0.,0.);
+    let box_max: vec3<f32> = vec3<f32>(f32(wz.x),f32(wz.y),f32(wz.z));
+
+    var tmin: f32= 0;
+    var tmax: f32= 0;
+
+    var t1: f32= 0;
+    var t2: f32= 0;
+
+    var tminaxis: f32= 0;
+    var tmaxaxis: f32= 0;
+
+    for (var ax = 0; ax<3; ax++){
+        t1= (box_min[ax]- rayo.source[ax]) / rayo.direction[ax];
+        t2= (box_max[ax]- rayo.source[ax]) / rayo.direction[ax];
 
 
+        //se asegura que tmin y tmax esten ordenados
+        tminaxis = min(t1,t2);
+        tmaxaxis = max(t1,t2);
 
-    //como ingresar coordenadas al feedbackloop
+        //actualiza tmin y tmax
+        tmin = max(tmin,tminaxis);
+        tmax = min(tmax,tmaxaxis);
+    }
 
-    let buff_idx = atomicAdd(&var_dat.feedback_idx, 1u);
+    //si el origen del rayo esta dentro del box, t_min sera negativo y tiene que er ignorado
+    if (tmin < 0.){
+        tmin = 0.;
+    }
 
-    if(buff_idx<init_data.feedback_buffer_size){
-        feedback[buff_idx] = NeoUVec3(u32(cell_coords.x),u32(cell_coords.y),u32(cell_coords.z));
-        return true;
-    }else{
+    //si tmin es menor o igual que tmax, el rayo intersecta el box
+    //ademas, si tmin == 0, rayo.source no cambia, de lo contrario rayo.source se movera al punto de interseccion con el box
+    if (tmin <= tmax) {
+        rayo.source = rayo.source + (tmin*rayo.direction);
+    } else {
+        //el rayo no intersecta nada y se le asigna el color verde por que si
+        asign_color(pixel,0x566727ffu);//VERDE musgo
         return false;
     }
 
+    //FINAL DE LA MAGIA
+    //!FINAL DEL BOUNDING BOX
+    //de siempre el source estar dentro del mundo, el algoritmo anterior no es neceesario
 
+    var ray_origin_grid: vec3<f32> = floor(rayo.source); // starting cell coordinates
+
+
+    let offset: vec3<f32> = ray_signf - (rayo.source - ray_origin_grid);//hecho por mi //? puede estar roto
+
+
+    //este representa al t_max solo al inicio, ya que sera modificado dentro del loop
+    var t_max: vec3<f32> = t_delta * offset;
+
+    //coordenadas del cell en las que se comiensa
+    var cell_coords: vec3<i32> = vec3<i32>(i32(ray_origin_grid.x),i32(ray_origin_grid.y),i32(ray_origin_grid.z));
+
+
+    for(var i=0u; i< MAX_RAY_STEPS;i++){
+
+        //!necesario crear una solucion similar para cada nivel (parecido a como se hara con is_voxel_filled() )
+        //esto es para evitar que los rayos se salgan del mundo
+        if(u32(cell_coords.x)>=(wz.x) || u32(cell_coords.y)>=(wz.y) || u32(cell_coords.z)>=(wz.z) || u32(cell_coords.x)<0 || u32(cell_coords.y)<0 || u32(cell_coords.z)<0){
+            asign_color(pixel,0x00ffffffu);//VERDE
+            return true;
+        }
+
+
+        //este iniciara el trabajo de raymarching en el brickmap actual
+        var rayo_mod: Ray = rayo;
+        rayo_mod.source = vec3<f32>(t_max.x,t_max.y,t_max.z);
+        if(work_brickcell(cell_coords,rayo_mod, pixel,t_delta)){
+            return true;
+        }
+
+
+        // //! cambiar como funciona is_voxel_filled() dependieondo del nivel en el que este (crear una funcion por cada nivel???)
+        // //brickmap -> revisara dentro del brickmap si el voxel el true o false (revisa el mismicimo brickmap)
+        // //brickcell -> revisara si existe un brickmap o si es una cell vacia (revisa dentro de las alocaciones)
+        // //celda superior 1 -> revisara si existe algun brickcell o si esta vacia (esta es solo un true/false)
+        // //TODO: de existir algo, se deve adentrarse e iniciar un nuevo 3d dda
+        // //? explorar como interpretar la escala del mundo (asi como multiplicar o dividir la pocicion de la camara y los rayos por cada nivel)
+        // if(is_voxel_filled(cell_coords) != 0u){
+        //     //! DEJAR DE UTILIZAR is_voxel_filled() COMO OBTENEDOR DE COLORES Y CREAR UNA FUNCION PARA CADA CASO NECESARIO
+        //     asign_color(pixel,is_voxel_filled(cell_coords));
+        //     return true;
+        // }
+
+        if(t_max.x < t_max.y){
+            if(t_max.x < t_max.z){
+                cell_coords.x += ray_sign.x;
+                t_max.x += t_delta.x;
+            }else{
+                cell_coords.z += ray_sign.z;
+                t_max.z += t_delta.z;
+            }
+        }else{
+            if(t_max.y < t_max.z){
+                cell_coords.y += ray_sign.y;
+                t_max.y += t_delta.y;
+            }else{
+                cell_coords.z += ray_sign.z;
+                t_max.z += t_delta.z;
+            }
+        }
+    }
+
+
+    //retorna falso si la cantidad de pasos_maximos es alcanzado (idealmente nunca deveria alcanzarlo)
+    return false;
+}
+
+//funcion que encapsula el trabajo necesario para un Brickcell y navegar el Brickmap
+fn work_brickcell(cell_coords: vec3<i32>,ray: Ray,pixel: vec2<u32>,t_delta : vec3<f32>) -> bool {
+    //let wz: NeoUVec3 = init_data.world_size;
+    let wz: NeoUVec3 = NeoUVec3(init_data.world_size_x,init_data.world_size_y,init_data.world_size_z);
+    
+    
+    
+    //revisar banderas de la cell, si esta siendo cargada, se asigna el color del puntero y se retorna true (de que hubo hit)
+    var current_cell:u32 = brickgrid[cell_coords_to_idx(cell_coords)];
+    let colointer: u32 = current_cell>>8u; // se obtiene el color LOD o el brickmap_buffer_idx
+    let banderas: u32 = (current_cell<<24u)>>24u; //esta operacion deja solo las banderas
+    
+    //si el rickmap esta vacio
+    if (banderas == 0u){
+        return false;
+    }
+    
+    if (banderas == 4u){
+        //el brickmap esta siendo cargado
+        let lod_color:u32 = (colointer<<8u)+255u;
+        let test_color:u32 = hex_color(1.,200.,200.,255.);
+        asign_color(pixel,lod_color);
+        //retorna true para que se detenga el raymarching
+        return true;
+    }
+
+    //esto solo se ejecuta si el Brickmap no ha sido cargado()
+    if (banderas==2u){
+
+        //como ingresar coordenadas al feedbackloop
+        //esto agrega el brickmap al feedback buffer
+        let buff_idx = atomicAdd(&var_dat.feedback_idx, 1u);
+
+        if(buff_idx<init_data.feedback_buffer_size){
+            //agregar al buffer si este no esta lleno
+            feedback[buff_idx] = NeoUVec3(u32(cell_coords.x),u32(cell_coords.y),u32(cell_coords.z));
+            //cambiar cell para que su flag diga que esta cargandose
+            let cell_idx: u32 = cell_coords_to_idx(cell_coords);
+            var pointer = 0xffffffu << 8u;//hacer espacio para las flags (negro24_banderas8)
+            pointer = pointer + 4u; //se agrega la bandera de CARGANDO
+
+            //se asigna el nuevo puntero
+            brickgrid[cell_idx] = pointer;
+
+            //se retorna true para que se detenga el raymarching
+            return true;
+        }else{
+            //no se agrega al buffer por que no hay espacio y el puntero no se cambia
+            //aun asi, se retorna true para que dse detenga el raymarching
+            return true;
+        }
+
+    }
+
+    //si es que el brickmap esta vacio
+    if (banderas==0u){
+        //se retorna false para que el raymarching continue
+        return false;
+    }
+
+    //De estar cargado el brickmap, el raymarching de este se ejecuta
+    
+    
+    //* valiable ray ya tiene su direccion sanitisada, por lo que no hay que hacerlo denuevo
+    //* y al estar normalizada, esta no tiene que ser tranformada a las cordenadas de voxel
+
+    var rayo : Ray = ray;
+
+    let MAX_RAY_STEPS: u32 = 500u;// aqui es inecesario
+    
+    
+    //aqui se obtiene el signo de cada valor de la direccion, de modo que se sepa si se debe aumentar o disminuir
+    //en el axis que se este calculando en el momento
+    //* el vector ray_sign y ray_signf son lo mismo que stepX,stepY,stepZ en un solo vector (habra que separarlos???)
+    var ray_signf: vec3<f32> = sign(rayo.direction);
+    var ray_sign: vec3<i32> = vec3<i32>(i32(ray_signf.x),i32(ray_signf.y),i32(ray_signf.z));
+    //var ray_step: vec3<f32> = 1./rayo.direction; //si no funciona, hacerlo por cada valor;
+
+
+    //MODIFICAR EL RAY PARA QUE ESTE EN LAS CORDENADAS DE VOXEL
+    //ya que desde el raymarching anterior, ray.source eta en el borde del brickmap
+    //solo de deve obtener la parte fraccional del source y multiplicarlo por el tamaño de cada axis del brickmap 8x8x8
+    rayo.source = (rayo.source - trunc(rayo.source)) *8.;
+    
+    
+    var ray_origin_grid: vec3<f32> = floor(rayo.source); // starting voxel coordinates
+
+    
+    let offset: vec3<f32> = ray_signf - (rayo.source - ray_origin_grid);
+
+
+    //este representa al t_max solo al inicio, ya que sera modificado dentro del loop
+    var t_max: vec3<f32> = t_delta * offset;
+
+    //coordenadas del cell en las que se comiensa
+    var voxel_coords: vec3<i32> = vec3<i32>(i32(ray_origin_grid.x),i32(ray_origin_grid.y),i32(ray_origin_grid.z));
+    
+
+
+    for(var i=0u; i< MAX_RAY_STEPS;i++){
+
+        
+        //detecta si el rayo salio del brickmap y por lo tanto el raymarching deve seguir 
+        if(voxel_coords.x>=(8) || voxel_coords.y>=(8) || voxel_coords.z>=(8) || voxel_coords.x<0 || voxel_coords.y<0 || voxel_coords.z<0){
+            return false;
+        }
+
+
+        //TODO: AQUI CALCULAR EL INDICE Y ESO Y DESPUES VER SI EL VOXEL ES UN HIT O NO MEDIANTE BITSHIFT
+
+        //voxel coords tienen que transformarse en voxel_idx y despues voxel_idx a una coordenada 2d comaptible con [32u;16]
+
+        let voxel_idx: u32 = (((u32(voxel_coords.x) * 8u) + u32(voxel_coords.y)) * 8u) + u32(voxel_coords.z);
+        let buffer_coords: vec2<u32> = vec2<u32>(voxel_idx%32u,voxel_idx/16u);
+        var act_brick: Brickmap = brickmap_data[colointer];
+        var aux_storage: u32 = act_brick.datos[buffer_coords.y];
+        aux_storage = (aux_storage << buffer_coords.x) >> 31u;
+
+        if (aux_storage == 1u) {
+            //se glpeo un voxel
+
+            //let color: u32 = hex_color(f32((cell_coords.x*8)%255),f32((cell_coords.y*8)%255),f32((cell_coords.z*8)%255),255.);
+            let color: u32 = hex_color(255.,0.,0.,255.);
+            asign_color(pixel,color);
+
+            //se retorna true para que se detenga el raymarching
+            return true;
+        }
+
+
+
+
+
+        // //! cambiar como funciona is_voxel_filled() dependieondo del nivel en el que este (crear una funcion por cada nivel???)
+        // //brickmap -> revisara dentro del brickmap si el voxel el true o false (revisa el mismicimo brickmap)
+        // //brickcell -> revisara si existe un brickmap o si es una cell vacia (revisa dentro de las alocaciones)
+        // //celda superior 1 -> revisara si existe algun brickcell o si esta vacia (esta es solo un true/false)
+        // //TODO: de existir algo, se deve adentrarse e iniciar un nuevo 3d dda
+        // //? explorar como interpretar la escala del mundo (asi como multiplicar o dividir la pocicion de la camara y los rayos por cada nivel)
+        // if(is_voxel_filled(voxel_coords) != 0u){
+        //     //! DEJAR DE UTILIZAR is_voxel_filled() COMO OBTENEDOR DE COLORES Y CREAR UNA FUNCION PARA CADA CASO NECESARIO
+        //     asign_color(pixel,is_voxel_filled(voxel_coords));
+        //     return true;
+        // }
+
+        if(t_max.x < t_max.y){
+            if(t_max.x < t_max.z){
+                voxel_coords.x += ray_sign.x;
+                t_max.x += t_delta.x;
+            }else{
+                voxel_coords.z += ray_sign.z;
+                t_max.z += t_delta.z;
+            }
+        }else{
+            if(t_max.y < t_max.z){
+                voxel_coords.y += ray_sign.y;
+                t_max.y += t_delta.y;
+            }else{
+                voxel_coords.z += ray_sign.z;
+                t_max.z += t_delta.z;
+            }
+        }
+    }
+
+
+    //retorna falso si la cantidad de pasos_maximos es alcanzado (idealmente nunca deveria alcanzarlo)
+    return false;
+
+}
+
+
+//convierte las coordenedas 3d de brickgrid/cell en un indice uni dimencional
+//util para navegar el brickgrid buffer
+fn cell_coords_to_idx(cell_coords: vec3<i32>) -> u32 {
+    //let wz: NeoUVec3 = init_data.world_size;
+    let wz: NeoUVec3 = NeoUVec3(init_data.world_size_x,init_data.world_size_y,init_data.world_size_z);
+    return u32((((u32(cell_coords.x) * wz.y) + u32(cell_coords.y))* wz.z) +u32(cell_coords.z));
 }
 
 

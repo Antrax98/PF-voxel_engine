@@ -66,7 +66,7 @@ fn feedback_chunkgen_system(
     let mut vw = &mut voxel_world.single_mut().chunk_hash;
     
     let task_pool = AsyncComputeTaskPool::get();
-    let mut brickmap_response: Vec<(BrickMap,u32)> = vec![];
+    let mut brickmap_response: Vec<(Option<BrickMap>,u32)> = vec![];
     let mut brickmap_to_send: Vec<i32>;
     let mut chunk_to_gen: Vec<UVec3>= vec![];
     //ciclo for que, de ya estar cargado el chunk, lo añade a un vector que se enviara de vuelta al voxel-renderer, de no estar vacio dicho vector
@@ -81,7 +81,15 @@ fn feedback_chunkgen_system(
                     ChunkState::Loaded => {
                         // agregar brickMap al vector de respuesta
                         //TODO: PUEDE QUE ESTA PARTE CONTENGA ERRORES (SOLO PROBABLE devido a la conversion entre cordenadas brickmap y cordenadas globales)
-                        brickmap_response.push((chunk.brickmap_array.as_ref().unwrap()[(((((cell_coord.x%16)*16)+(cell_coord.y%16))*16)+(cell_coord.z%16))as usize].clone(),(((((cell_coord.x)*16)+(cell_coord.y))*16)+(cell_coord.z))));
+                        //brickmap_response.push((chunk.brickmap_array.as_ref().unwrap()[(((((cell_coord.x%16)*16)+(cell_coord.y%16))*16)+(cell_coord.z%16))as usize].clone(),(((((cell_coord.x)*16)+(cell_coord.y))*16)+(cell_coord.z))));
+                        
+                        //? est parte deve ser cambiada en el futuro
+                        if cell_coord.y > 15 {
+                            brickmap_response.push((None,((((cell_coord.x* WORLD_SIZE.1)+cell_coord.y)*WORLD_SIZE.2)+cell_coord.z)));
+                        } else {
+                            brickmap_response.push((Some(chunk.brickmap_array.as_ref().unwrap()[(((((cell_coord.x%16)*16)+(cell_coord.y%16))*16)+(cell_coord.z%16))as usize].clone()),((((cell_coord.x* WORLD_SIZE.1)+cell_coord.y)*WORLD_SIZE.2)+cell_coord.z)));
+                        }
+                        
                     },
                     ChunkState::Loading => println!("Loading Chunk => {}",chunk_coord),
                     ChunkState::Unloading => println!("Unloading Chunk => {}",chunk_coord)
@@ -93,33 +101,43 @@ fn feedback_chunkgen_system(
                 }else{
                     //aqui si el task NO EXOSTE
                     let task = task_pool.spawn(async move {
-                        let voxel_world_size: UVec3 = UVec3::new(WORLD_SIZE.0,WORLD_SIZE.1,WORLD_SIZE.2) *16*8;
+                        let vws: UVec3 = UVec3::new(WORLD_SIZE.0,WORLD_SIZE.1,WORLD_SIZE.2) *16*8;
                         //AQUI GENERACION DEL CHUNK
-                        let c_coord = chunk_coord.clone();
+                        let c_coord = chunk_coord.clone();//COORDENADAS DEL CHUNK
                         let n_map = Perlin::new(SEED);
                         let mut dat_box: Vec<BrickMap> = Vec::new();
                         for bm_idx in 0..4096 {
-                            let bm_coords: UVec3 = UVec3 { x: (bm_idx/(256)), y: ((bm_idx/16)%16), z: (bm_idx%16) };
+                            let bm_coords: UVec3 = UVec3 { x: (bm_idx/(256)), y: ((bm_idx/16)%16), z: (bm_idx%16) };// coordenadas locales a su chunk
+                            let global_bm_coords: UVec3 = UVec3 { x: bm_coords.x+(c_coord.x*16), y: bm_coords.y+(c_coord.y*16), z: bm_coords.z+(c_coord.z*16) };// coordenadas globales del brickmap
                             let mut bm_aux: BitArray<[u32; 16], Msb0> = bitarr![u32, Msb0;0;512];
                             for v_idx in 0..512 {
-                                let v_coords: UVec3 = UVec3 { x: (v_idx/(64)), y: ((v_idx/8)%8), z: (v_idx%8) } % 16;
+                                let v_coords: UVec3 = UVec3 { x: (v_idx/(64)), y: ((v_idx/8)%8), z: (v_idx%8) };//coordenadas locales a su brickmap
+                                let global_v_coords: UVec3 = UVec3 { x: v_coords.x+(global_bm_coords.x*8), y: v_coords.y+(global_bm_coords.y*8), z: v_coords.z+(global_bm_coords.z*8) };//coordenadas globales del voxel
                                 //AQUI CREAR EL BRICKMAP POR CADA VOXEL
                                 let detalle = 0.001;
-                                let voxel_val = n_map.get([(v_coords.x +(bm_coords.x * 8)+(c_coord.x*16*8)) as f64 * detalle,0 as f64,(v_coords.z +(bm_coords.z * 8)+(c_coord.z*16*8)) as f64]).abs()* detalle;
+                                let voxel_val = n_map.get([global_v_coords.x as f64 * detalle,0 as f64,global_v_coords.z as f64]).abs()* detalle;
                                 //let v_aux: UVec2 = UVec2 { x: v_coords.x +(bm_coords.x * 8)+(c_coord.x*16*8), y: () };
+                                
+                                
+                                if c_coord.y == 0 {
+                                    bm_aux.set(v_idx as usize, true);
+                                }
 
-                                //value = funcion que devuelve true/false
-                                bm_aux.set(v_idx as usize, {
-                                    if (voxel_val*128.) as u32 == v_coords.z {
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                });
 
-                                bm_aux.set(v_idx as usize, true);
+
+                                // //value = funcion que devuelve true/false
+                                // bm_aux.set(v_idx as usize, {
+                                //     if (voxel_val*128.) as u32 == v_coords.z {
+                                //         true
+                                //     } else {
+                                //         false
+                                //     }
+                                // });
+
+                                //bm_aux.set(v_idx as usize, true);
                             }
                             //AQUI AGREGAR EL BRICKMAP AL DATBOX
+                            
                             dat_box.push(BrickMap { datos: bm_aux});
                         }
 
